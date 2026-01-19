@@ -30,8 +30,7 @@ git clone https://github.com/facebookresearch/all-atom-diffusion-transformer
 cd all-atom-diffusion-transformer
 
 # create new python environment
-mamba create -n myenv python=3.10 -c defaults
-mamba activate myenv
+conda create -n adit -c conda-forge mamba -y
 
 # install pytorch according to instructions (use CUDA version for your system)
 # https://pytorch.org/get-started/
