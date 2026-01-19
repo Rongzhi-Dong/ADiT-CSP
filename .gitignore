@@ -160,3 +160,8 @@ ssh_key.pub
 wandb/
 pre_ckpt/
 *.ckpt
+ssh_key
+ssh_key.pub
+wandb/
+pre_ckpt/
+*.ckpt
