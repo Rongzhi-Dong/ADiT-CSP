@@ -61,9 +61,11 @@ pip install accelerate
 pip install smact==2.6
 conda install -c conda-forge openbabel
 conda install jupyterlab pandas seaborn joblib yaml -c conda-forge
-pip install pyxtal==0.6.7 mofchecker==0.9.6 rdkit==2024.3.5 e3nn==0.5.1 posebusters==0.3.1 download==0.3.5 ipdb wandb rootutils rich pathos p-tqdm einops svgwrite cairosvg reportlab lmdb torchdiffeq huggingface_hub
+pip install pyxtal==0.6.7 rdkit==2024.3.5 e3nn==0.5.1 posebusters==0.3.1 download==0.3.5 ipdb wandb rootutils rich pathos p-tqdm einops svgwrite cairosvg reportlab lmdb torchdiffeq huggingface_hub
 pip install importlib-resources
-pip install rootutils
+pip install mofchecker==0.9.6
+# if pyeqeq error
+conda install -c conda-forge mofchecker==0.9.6 
 # install pre-commit hooks (optional)
 pip install pre-commit
 pre-commit install
