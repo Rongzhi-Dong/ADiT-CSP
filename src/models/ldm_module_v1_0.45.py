@@ -705,11 +705,8 @@ class LatentDiffusionLitModule(LightningModule):
                     _lengths = out["lengths"][idx_in_batch] * float(num_atom) ** (
                         1 / 3
                     )  # unscale lengths
-                    # _angles = torch.rad2deg(out["angles"][idx_in_batch])  # convert to degrees
-                    _angles_rad = out["angles"][idx_in_batch]  # Keep in RADIANS for cell matrix
-                    _angles_deg = torch.rad2deg(_angles_rad)   # Convert to degrees for saving
-                    
-                    cell = self.build_lattice_matrix(_lengths.unsqueeze(0), _angles_rad.unsqueeze(0))[0]
+                    _angles = torch.rad2deg(out["angles"][idx_in_batch])  # convert to degrees
+                    cell = self.build_lattice_matrix(_lengths.unsqueeze(0), _angles.unsqueeze(0))[0]
                     cell_inv = torch.linalg.inv(cell)
                     _frac_coords_physical = (_pos_A @ cell_inv.T) 
                     _frac_coords_wrapped = _frac_coords_physical % 1.0
@@ -732,7 +729,7 @@ class LatentDiffusionLitModule(LightningModule):
                             "pos": _pos_A.detach().cpu().numpy(),
                             "frac_coords": _frac_coords_wrapped.detach().cpu().numpy(),
                             "lengths": _lengths.detach().cpu().numpy(),
-                            "angles": _angles_deg.detach().cpu().numpy(),
+                            "angles": _angles.detach().cpu().numpy(),
                             "sample_idx": samples_so_far
                             + self.global_rank * len(decoder_batch["num_atoms"])
                             + idx_in_batch,
@@ -847,16 +844,175 @@ class LatentDiffusionLitModule(LightningModule):
         out = self.autoencoder.decode(batch)
         return out, batch, samples
 
+    '''
+    def sample_and_decode_csp(self, batch, cfg_scale=4.0):
+        """CSP Sampling using a real batch from the dataset."""
+        ###  new function for csp by RZD   ######
+
+        # 1. Extract Info from Batch
+        batch_size = batch.num_graphs
+        # Convert atom_types to dense [B, N]
+        atom_types_dense, token_mask = to_dense_batch(batch.atom_types, batch.batch)
+        sample_lengths = atom_types_dense.size(1)
+
+        # IMPORTANT: real per-graph number of atoms (B,)
+        num_atoms = batch.num_atoms  # tensor shape [B] ### modified by RZD
+        
+        
+        # === DIAGNOSTIC 1: Input batch ===
+        print(f"\n{'='*60}")
+        print(f"DIAGNOSTIC 1: Input Batch")
+        print(f"{'='*60}")
+        print(f"batch_size: {batch_size}")
+        print(f"batch.num_atoms: {num_atoms}")
+        print(f"batch.num_atoms sum: {num_atoms.sum()}")
+        print(f"batch.batch unique counts: {torch.bincount(batch.batch)}")
+        print(f"atom_types_dense shape: {atom_types_dense.shape}")
+        print(f"token_mask shape: {token_mask.shape}")
+        print(f"token_mask sum per sample: {token_mask.sum(dim=1)}")
+        print(f"Match? {torch.all(token_mask.sum(dim=1) == num_atoms)}")        
+            
+        
+        
+        # 2. Prepare Inputs
+        dataset_idx = batch.dataset_idx+1
+        spacegroup = batch.spacegroup
+        # print("*******", spacegroup)
+        # exit()
+
+        # 3. Call Interpolant with atom_types
+        samples = self.interpolant.sample_with_classifier_free_guidance(
+            batch_size=batch_size,
+            # num_tokens=max(sample_lengths),  ## N=20 for MP_20
+            num_tokens = int(sample_lengths), ### modified by RZD
+            emb_dim=self.denoiser.d_x,
+            model=self.denoiser,
+            dataset_idx=dataset_idx,
+            spacegroup=spacegroup,
+            cfg_scale=cfg_scale,
+            token_mask=token_mask,
+            atom_types=atom_types_dense,  #
+        )
+
+        # get final samples and remove padding (to PyG format)
+        x = samples["clean_traj"][-1][token_mask]
+        
+        # === DIAGNOSTIC 2: Sampled latent ===
+        print(f"\n{'='*60}")
+        print(f"DIAGNOSTIC 2: Sampled Latent")
+        print(f"{'='*60}")
+        print(f"x shape: {x.shape}")
+        print(f"Expected total atoms: {token_mask.sum()}")
+        print(f"Actual atoms in x: {x.shape[0]}")
+        print(f"Match? {x.shape[0] == token_mask.sum()}")
+        print(f"x channel 0 (types) range: [{x[..., 0].min():.2f}, {x[..., 0].max():.2f}]")
+            
+        #### newly added by RZD on Feb 9 ###############
+        # # Verify type channel is correct (helpful for debugging)
+        # if atom_types_dense is not None:
+        #     atom_types_flat = atom_types_dense[token_mask]
+        #     recovered_types = x[..., 0]
+        #     type_error = (recovered_types - atom_types_flat).abs().max()
+        #     if type_error > 0.5:
+        #         log.warning(f"Type channel drift detected: max error = {type_error:.4f}")
+        #     # Ensure exact types for decoding
+        #     x[..., 0] = atom_types_flat.to(x.dtype)
+        
+        # CRITICAL: Set channel 0 to atom types (deterministic channel)
+        # Extract atom types for non-padded positions
+        # atom_types_flat = atom_types_dense[token_mask]  # (total_nodes,)
+        # z_type = atom_types_flat.unsqueeze(-1).to(x.dtype)  # (total_nodes, 1)
+        # # Replace channel 0 with deterministic type information
+        # x = torch.cat([z_type, x[..., 1:]], dim=-1)  # Ensure channel 0 is types
+        
+        # atom_types_flat = batch.atom_types.to(x.dtype)
+        # x = x.clone()
+        # x[..., 0] = atom_types_flat
+        x[..., 0] = self.autoencoder.atom_types_to_ztype(batch.atom_types).to(x.dtype)
+        
+        #### End #############
+
+
+        # print(f"[DEBUG] Shapes:")
+        # print(f"  atom_types_dense: {atom_types_dense.shape}")  # (B, max_N)
+        # print(f"  token_mask: {token_mask.shape}")              # (B, max_N)
+        # print(f"  num_atoms: {num_atoms.shape}")                # (B,)
+        # print(f"  x (sampled): {x.shape}")                      # (sum(num_atoms), d+1)
+        # print(f"  x channel 0 range: [{x[..., 0].min():.2f}, {x[..., 0].max():.2f}]")
+        # print(f"  Expected atom types range: [{atom_types_dense.min()}, {atom_types_dense.max()}]")
+        # # Verify type channel
+        # atom_types_flat = atom_types_dense[token_mask]
+        # type_diff = (x[..., 0] - atom_types_flat).abs()
+        # print(f"  Type channel error: max={type_diff.max():.6f}, mean={type_diff.mean():.6f}")
+
+
+
+        decoder_batch = {
+            "x": x,
+            # "num_atoms": sample_lengths,
+            "num_atoms": num_atoms,  # <-- MUST be (B,) ### RZD
+            "batch": torch.repeat_interleave(
+                torch.arange(batch_size, device=self.device), num_atoms ### modified by RZD         
+            ),
+            # "token_idx": (torch.cumsum(token_mask, dim=-1, dtype=torch.int64) - 1)[token_mask],
+            "token_idx": batch.token_idx if hasattr(batch, 'token_idx') else None,
+        }
+        # if  DEBUG_LDM_LATENT:
+        #     print(f"[DEBUG CSP] x: {x.shape}, batch: {batch['batch'].shape} sum(num_atoms): {int(num_atoms.sum())}")
+        # decode samples to crystal structures using frozen decoder
+        
+        # === DIAGNOSTIC 3: Decoder input ===
+        print(f"\n{'='*60}")
+        print(f"DIAGNOSTIC 3: Decoder Input")
+        print(f"{'='*60}")
+        print(f"decoder_batch['x'] shape: {decoder_batch['x'].shape}")
+        print(f"decoder_batch['num_atoms']: {decoder_batch['num_atoms']}")
+        print(f"decoder_batch['batch'] unique: {torch.bincount(decoder_batch['batch'])}")
+        print(f"decoder_batch['batch'] max: {decoder_batch['batch'].max()}")
+        print(f"Expected batch indices: 0 to {batch_size - 1}")
+        
+        
+        out = self.autoencoder.decode(decoder_batch)
+
+        # === DIAGNOSTIC 4: Decoder output ===
+        print(f"\n{'='*60}")
+        print(f"DIAGNOSTIC 4: Decoder Output")
+        print(f"{'='*60}")
+        print(f"out['atom_types'] shape: {out['atom_types'].shape}")
+        print(f"out['pos'] shape: {out['pos'].shape}")
+        print(f"out['lengths'] shape: {out['lengths'].shape}")
+        print(f"out['angles'] shape: {out['angles'].shape}")
+        print(f"Expected structures: {batch_size}")
+        print(f"Actual structures in lengths: {out['lengths'].shape[0]}")
+        print(f"{'='*60}\n")
+        
+        return out, decoder_batch, samples
+    '''
     def sample_and_decode_csp(self, batch, cfg_scale=4.0):
         batch_size = batch.num_graphs
         num_atoms = batch.num_atoms
-
+        
+        # # Diagnostic 1: Check denoiser dimension
+        # print(f"\n{'='*70}")
+        # print(f"DIAGNOSTIC: Denoiser Configuration")
+        # print(f"{'='*70}")
+        # print(f"self.denoiser.d_x: {self.denoiser.d_x}")
+        # print(f"emb_dim being used: {self.denoiser.d_x}")  # You have this currently
+        # print(f"emb_dim should be: 9")  # What it should be
         
         # 1. Encode atom types
         with torch.no_grad():
             z_type_pyg = self.autoencoder.atom_types_to_ztype(batch.atom_types)
             z_type_dense, token_mask = to_dense_batch(z_type_pyg, batch.batch)
         
+        # # Diagnostic 2: Check type encoding
+        # print(f"\n{'='*70}")
+        # print(f"DIAGNOSTIC: Type Encoding")
+        # print(f"{'='*70}")
+        # print(f"batch.atom_types (raw): {batch.atom_types[:10]}")
+        # print(f"z_type_pyg (encoded): {z_type_pyg[:10]}")
+        # print(f"z_type_dense shape: {z_type_dense.shape}")
+
         # 2. Sample
         samples = self.interpolant.sample_with_classifier_free_guidance(
             batch_size=batch_size,
@@ -883,10 +1039,89 @@ class LatentDiffusionLitModule(LightningModule):
         cont_std = cont.std().item()
 
 
+        # print(f"\n{'='*70}")
+        # print(f"DECODER OUTPUT INVESTIGATION")
+        # print(f"{'='*70}")
+        # print(f"[DEBUG CSP] sampled latent shape: {x.shape}, cont mean={cont_mean:.6f}, cont std={cont_std:.6f}")
+        # # optionally fail-fast to discover where it went wrong
+        # if cont_std < 1e-6:
+        #     print("⚠️  Continuous latent std is near zero — cont channels collapsed!")
+        #     # Dump a small sample to inspect
+        #     print("  sample cont (first row, first 12 dims):", cont[0, :12].cpu().tolist() if cont.numel() else "N/A")
+
+        ######## END ###########
+
+
+        # # Diagnostic 3: Check sampled latent
+        # print(f"\n{'='*70}")
+        # print(f"DIAGNOSTIC: Sampled Latent")
+        # print(f"{'='*70}")
+        # print(f"x.shape: {x.shape}")
+        # print(f"x channel 0 (should be types): min={x[..., 0].min():.2f}, max={x[..., 0].max():.2f}")
+        # print(f"Original atom types: min={batch.atom_types.min()}, max={batch.atom_types.max()}")
+        
+        # Compare channel 0 with expected types
+        # atom_types_flat = batch.atom_types
+        # if z_type_pyg.dim() == 1:
+        #     z_type_pyg_compare = z_type_pyg
+        # else:
+        #     z_type_pyg_compare = z_type_pyg.squeeze(-1)
+        
+        # channel_0_values = x[..., 0]
+        # diff = (channel_0_values - z_type_pyg_compare).abs()
+        # # print(f"Difference between x[0] and z_type: max={diff.max():.6f}, mean={diff.mean():.6f}")
+        
+        # if diff.max() > 1.0:
+        #     print(f"⚠️  WARNING: Type channel has DRIFTED significantly!")
+        #     print(f"   This indicates type enforcement is NOT working!")
+        
+        # 4. Enforce type (fix shape first)
         if z_type_pyg.dim() == 1:
             z_type_pyg = z_type_pyg.unsqueeze(-1)
         x[..., 0:1] = z_type_pyg.to(x.dtype)
         
+        # # Diagnostic 4: Check decoder input
+        # print(f"\n{'='*70}")
+        # print(f"DIAGNOSTIC: Decoder Input")
+        # print(f"{'='*70}")
+        # print(f"Decoder will receive x.shape: {x.shape}")
+        
+
+        # # ------------------- RESCALE sampled continuous channels (inference-time fix) -------------------
+        # with torch.no_grad():
+        #     # sampled continuous part
+        #     sampled_cont = x[..., 1:]  # shape (total_nodes, d_cont)
+        #     samp_mean = float(sampled_cont.mean().detach().cpu())
+        #     samp_std = float(sampled_cont.std().detach().cpu().clamp(min=1e-8))
+
+        #     # get encoder stats on the SAME real batch (what decoder expects)
+        #     enc = self.autoencoder.encode(batch)
+        #     # prefer posterior.mode if available (this matches your encode usage in forward)
+        #     if "posterior" in enc and hasattr(enc["posterior"], "mode"):
+        #         z_enc = enc["posterior"].mode()
+        #     elif "posterior" in enc and hasattr(enc["posterior"], "sample"):
+        #         z_enc = enc["posterior"].sample()
+        #     elif "x" in enc:
+        #         z_enc = enc["x"]
+        #     else:
+        #         # fallback: raise informative error
+        #         raise RuntimeError("Could not extract encoder latent (expected enc['posterior'] or enc['x']).")
+
+        #     enc_mean = float(z_enc.mean().detach().cpu())
+        #     enc_std = float(z_enc.std().detach().cpu().clamp(min=1e-8))
+
+        #     # Compute scaling factor
+        #     scale = enc_std / samp_std
+        #     shift = enc_mean - samp_mean * scale
+
+        #     # Apply rescaling in-place (preserve dtype/device)
+        #     # new = (old - samp_mean) * scale + enc_mean  <==> old*scale + shift
+        #     x[..., 1:] = (x[..., 1:] - samp_mean) * scale + enc_mean
+
+        #     # Debug prints (optional, remove or gate behind a debug flag)
+        #     print(f"[SCALE FIX] sampled_cont mean/std = {samp_mean:.6f}/{samp_std:.6f}; encoder mean/std = {enc_mean:.6f}/{enc_std:.6f}")
+        #     print(f"[SCALE FIX] applied scale={scale:.4f}, shift={shift:.6f}; new cont mean={float(x[...,1:].mean()):.6f}, new cont std={float(x[...,1:].std()):.6f}")
+        # # -----------------------------------------------------------------------------------------------
 
         decoder_batch = {
             "x": x,
@@ -900,8 +1135,244 @@ class LatentDiffusionLitModule(LightningModule):
             "angles_radians": batch.angles_radians,
         }
 
-        out = self.autoencoder.decode(decoder_batch)
 
+        # # DIAG A: per-structure cont std + per-structure frac span after rescale
+        # with torch.no_grad():
+        #     cont = x[..., 1:]  # (total_nodes, d_cont)
+        #     ptr = decoder_batch["batch"]  # (total_nodes,), values 0..B-1
+        #     B = int(ptr.max().item()) + 1
+        #     per_struct_stats = []
+        #     start = 0
+        #     print("\n[DIAG] per-structure cont std and resulting frac span (first 8 structures):")
+        #     for i in range(min(B, 8)):
+        #         # indices for this structure
+        #         idxs = (ptr == i).nonzero(as_tuple=True)[0]
+        #         if idxs.numel() == 0:
+        #             continue
+        #         cont_i = cont[idxs]  # (n_i, d_cont)
+        #         std_per_dim = cont_i.std(dim=0).cpu().tolist()
+        #         std_global = float(cont_i.std().cpu())
+        #         # decode fractionals for this structure to compute span
+        #         # build a one-structure decoder_batch and decode (cheap-ish)
+        #         db = {"x": x[idxs].unsqueeze(0).reshape(-1, x.shape[-1]), "num_atoms": torch.tensor([idxs.numel()]), "batch": torch.zeros(idxs.numel(), dtype=torch.long)}
+        #         # reuse existing decode by copying and adapting minimal fields (depends on your autoencoder.decode signature)
+        #         # To avoid heavy decode here, we compute frac from pos returned earlier: we'll find pos slice by searching out.
+        #         per_struct_stats.append((i, idxs.numel(), std_global, std_per_dim))
+        #         print(f" struct {i}: n={idxs.numel():3d}, cont std global={std_global:.4f}, cont std per-dim (first 6)={std_per_dim[:6]}")
+        # # DIAG B: PCA on cont latents for a representative structure (0)
+        # # import torch
+        # from torch import svd
+
+        # with torch.no_grad():
+        #     ptr = decoder_batch["batch"]
+        #     idxs0 = (ptr == 0).nonzero(as_tuple=True)[0]
+        #     if idxs0.numel() >= 4:
+        #         cont0 = x[idxs0].float()[..., 1:]  # (n0, d_cont)
+        #         # center
+        #         cont0c = cont0 - cont0.mean(dim=0, keepdim=True)
+        #         # SVD
+        #         U, S, V = torch.svd(cont0c)  # S singular values
+        #         sing = S.cpu().numpy()
+        #         var_explained = (sing**2) / (sing**2).sum()
+        #         print(f"[DIAG PCA] structure0 singular values (first 8): {sing[:8].tolist()}")
+        #         print(f"[DIAG PCA] structure0 var explained (first 8): {var_explained[:8].tolist()}")
+        #     else:
+        #         print("[DIAG PCA] structure0 too small for PCA.")
+
+
+        # ######## Feb 10 ######
+        # # Assert shape & ordering
+        # expected_latent_dim = self.autoencoder.latent_dim + 1 if hasattr(self.autoencoder, "latent_dim") else x.size(-1)
+        # assert x.shape[-1] == expected_latent_dim, f"latent dim mismatch: got {x.shape[-1]}, expected {expected_latent_dim}"
+
+        # # check type channel equals mapping (sanity)
+        # expected_type = self.autoencoder.atom_types_to_ztype(batch.atom_types).to(x.dtype)
+        # # check only first few entries to avoid heavy ops
+        # if x.size(0) >= expected_type.size(0):
+        #     if not torch.allclose(x[: expected_type.size(0), 0:1], expected_type, atol=1e-5):
+        #         print("⚠️  type-channel mismatch before decode (sanity check failed).")
+
+
+        # with torch.no_grad():
+        #     # sampled cont (flat over all nodes)
+        #     sampled_cont = x[..., 1:]  # shape (total_nodes, d_cont)
+        #     print("[TEST] sampled cont mean/std per-dim:", sampled_cont.mean(dim=0).cpu().tolist(), sampled_cont.std(dim=0).cpu().tolist())
+        #     print("[TEST] sampled cont global mean/std:", float(sampled_cont.mean()), float(sampled_cont.std()))
+
+        #     # get encoder stats on the *same real batch* (what decoder expects)
+        #     enc = self.autoencoder.encode(batch)
+        #     # use posterior mode (or sample) as used during forward if applicable
+        #     if "posterior" in enc:
+        #         z_enc = enc["posterior"].mode() if hasattr(enc["posterior"], "mode") else enc["posterior"].sample()
+        #     else:
+        #         z_enc = enc["x"]  # fallback
+        #     # z_enc is (total_nodes, d_cont) or (N, d_cont) matching order used earlier
+        #     print("[TEST] encoder cont mean/std per-dim:", z_enc.mean(dim=0).cpu().tolist(), z_enc.std(dim=0).cpu().tolist())
+        #     print("[TEST] encoder cont global mean/std:", float(z_enc.mean()), float(z_enc.std()))
+        
+        # with torch.no_grad():
+        #     # compute scalars (global) — robust to zeros
+        #     sampled_std = float(sampled_cont.std().clamp(min=1e-8))
+        #     enc_std = float(z_enc.std().clamp(min=1e-8))
+        #     sampled_mean = float(sampled_cont.mean())
+        #     enc_mean = float(z_enc.mean())
+
+        #     scale = enc_std / sampled_std
+        #     print(f"[TEST] scaling sampled cont by factor {scale:.4f} (enc_std {enc_std:.4f}, samp_std {sampled_std:.4f})")
+
+        #     x_test = x.clone()
+        #     x_test[..., 1:] = (x_test[..., 1:] - sampled_mean) * scale + enc_mean
+
+        #     # rebuild decoder_batch.x pointer to x_test (same decoder_batch in your code)
+        #     decoder_batch_test = dict(decoder_batch)
+        #     decoder_batch_test["x"] = x_test
+
+        #     out_test = self.autoencoder.decode(decoder_batch_test)
+
+        #     # print a quick frac check for first structure
+        #     start_idx = 0
+        #     for idx in range(min(3, batch_size)):
+        #         n = num_atoms[idx].item()
+        #         frac_test = out_test["frac_coords"][start_idx : start_idx + n]
+        #         print(f"[TEST-DECODE] struct {idx} frac range after rescale: [{frac_test.min():.4f}, {frac_test.max():.4f}]")
+        #         start_idx += n
+
+
+        # with torch.no_grad():
+        #     # take z_type from x (or compute from batch)
+        #     z_type_flat = x[..., 0:1].clone()
+
+        #     # make cont noise at encoder scale
+        #     noise = torch.randn_like(x[..., 1:]) * float(z_enc.std())
+        #     x_manual = torch.cat([z_type_flat, noise], dim=-1)
+
+        #     decoder_batch_manual = dict(decoder_batch)
+        #     decoder_batch_manual["x"] = x_manual
+
+        #     out_manual = self.autoencoder.decode(decoder_batch_manual)
+        #     # print first struct frac range
+        #     start_idx = 0
+        #     for idx in range(min(3, batch_size)):
+        #         n = num_atoms[idx].item()
+        #         frac_m = out_manual["frac_coords"][start_idx : start_idx + n]
+        #         print(f"[MANUAL-DECODE] struct {idx} frac range with random cont noise: [{frac_m.min():.4f}, {frac_m.max():.4f}]")
+        #         start_idx += n
+
+        # ######## END #########    
+
+
+        out = self.autoencoder.decode(decoder_batch)
+    
+        # # After: out = self.autoencoder.decode(decoder_batch)
+        # print(f"\n{'='*70}")
+        # print(f"DECODER OUTPUT INVESTIGATION")
+        # print(f"{'='*70}")
+
+        # # Test: Recompute fractional coords from positions manually
+        # start_idx = 0
+        # for idx in range(min(3, batch_size)):  # Check first 3 structures
+        #     n = num_atoms[idx].item()
+            
+        #     # Get outputs
+        #     pos = out["pos"][start_idx:start_idx + n]  # (n, 3) in nm
+        #     frac_from_decoder = out["frac_coords"][start_idx:start_idx + n]  # (n, 3)
+        #     lengths = out["lengths"][idx]  # (3,) scaled
+        #     angles = out["angles"][idx]  # (3,) in radians
+            
+        #     print(f"\nStructure {idx} ({n} atoms):")
+        #     print(f"  Positions (nm): range [{pos.min():.4f}, {pos.max():.4f}]")
+        #     print(f"  Frac from decoder: range [{frac_from_decoder.min():.4f}, {frac_from_decoder.max():.4f}]")
+        #     print(f"  Lengths (scaled): {lengths}")
+        #     print(f"  Angles (rad): {angles}")
+            
+        #     # Manually recompute fractional coordinates
+        #     # Step 1: Build cell matrix
+        #     unscaled_lengths = lengths * (n ** (1/3))
+        #     a, b, c = unscaled_lengths[0], unscaled_lengths[1], unscaled_lengths[2]
+        #     alpha, beta, gamma = angles[0], angles[1], angles[2]
+            
+
+        #     device = a.device
+        #     dtype = a.dtype
+
+        #     # Create constants on the CORRECT device immediately
+        #     zero = torch.tensor(0.0, device=device, dtype=dtype)
+        #     # Build cell vectors (standard crystallographic convention)
+        #     ax, ay, az = a, zero, zero
+        #     bx = b * torch.cos(gamma)
+        #     by = b * torch.sin(gamma)
+        #     bz = zero
+        #     cx = c * torch.cos(beta)
+        #     cy = c * (torch.cos(alpha) - torch.cos(beta) * torch.cos(gamma)) / torch.sin(gamma)
+        #     cz = torch.sqrt(torch.clamp(c**2 - cx**2 - cy**2, min=1e-8))
+            
+        #     cell = torch.stack([
+        #         torch.stack([ax, ay, az]),
+        #         torch.stack([bx, by, bz]),
+        #         torch.stack([cx, cy, cz])
+        #     ])  # (3, 3)
+            
+        #     print(f"  Cell matrix (Å):\n{cell}")
+        #     print(f"  Cell volume: {torch.linalg.det(cell):.2f} Å³")
+            
+        #     # Step 2: Convert positions to Ångströms
+        #     pos_angstrom = pos * 10.0  # nm to Å
+            
+
+        #     # --- THE TRUTH FINDER ---
+        #     device = pos.device
+        #     cell_inv = torch.linalg.inv(cell)
+
+        #     # 1. Standard (Row-major)
+        #     f_row = (pos * 10.0) @ cell_inv.T
+        #     # 2. Column-major 
+        #     f_col = (torch.linalg.solve(cell, (pos * 10.0).T)).T
+        #     # 3. Row-major with 0.5 shift
+        #     f_row_shift = f_row + 0.5
+        #     # 4. Column-major with 0.5 shift
+        #     f_col_shift = f_col + 0.5
+
+        #     conventions = {
+        #         "Row-major": f_row,
+        #         "Column-major": f_col,
+        #         "Row-major + Shift": f_row_shift,
+        #         "Column-major + Shift": f_col_shift
+        #     }
+
+        #     print(f"\n[DEBUG] Searching for the correct convention:")
+        #     for name, f_test in conventions.items():
+        #         # We compare the 'span' of the coordinates first
+        #         test_span = f_test.max() - f_test.min()
+        #         dec_span = frac_from_decoder.max() - frac_from_decoder.min()
+        #         diff = (f_test - frac_from_decoder).abs().mean()
+                
+        #         print(f"  {name:20}: Mean Diff={diff:.4f}, Span Ratio={test_span/dec_span:.2f}")
+
+
+        #     # Step 3: Compute fractional coordinates
+        #     try:
+        #         cell_inv = torch.linalg.inv(cell)
+        #         frac_manual = pos_angstrom @ cell_inv.T
+        #         frac_manual_wrapped = frac_manual % 1.0
+                
+        #         print(f"  Manually computed frac (unwrapped): [{frac_manual.min():.4f}, {frac_manual.max():.4f}]")
+        #         print(f"  Manually computed frac (wrapped):   [{frac_manual_wrapped.min():.4f}, {frac_manual_wrapped.max():.4f}]")
+                
+        #         # Compare with decoder output
+        #         diff = (frac_from_decoder - frac_manual).abs().max()
+        #         print(f"  Difference from decoder frac: {diff:.6f}")
+                
+        #         if diff > 0.1:
+        #             print(f"  ⚠️  Large difference! Decoder is computing frac_coords differently!")
+                
+        #     except RuntimeError as e:
+        #         print(f"  ❌ Error computing manual frac_coords: {e}")
+        #         print(f"     Cell might be singular or degenerate")
+            
+        #     start_idx += n
+
+        # print(f"{'='*70}\n")
+ 
         return out, decoder_batch, samples
  
 

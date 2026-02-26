@@ -1,6 +1,10 @@
 _target_: src.models.ldm_module.LatentDiffusionLitModule
 
-autoencoder_ckpt: "/home/rongzhid/ADiT/pre_ckpt/vae.ckpt"  # path to VAE checkpoint
+# autoencoder_ckpt: "/home/rongzhi/ADiT-CSP/logs/train_autoencoder/runs/vae_latent@8_kl@0.00001_2026-01-19_23-43-03/checkpoints/vae-epoch@1399-step@148400-val_mp20_match_rate@0.8104.ckpt"  # path to VAE checkpoint
+
+# autoencoder_ckpt: "/home/rongzhi/ADiT-CSP/logs/train_autoencoder/runs/vae_latent@8_kl@0.00001_2026-01-19_23-43-03/checkpoints/vae-epoch@2294-step@243270-val_mp20_match_rate@0.8103.ckpt"  # path to VAE checkpoint
+autoencoder_ckpt: "/home/rongzhi/ADiT-CSP/logs/train_autoencoder/runs/vae_latent@8_kl@0.00001_2026-01-19_23-43-03/checkpoints/vae-epoch@3049-step@323300-val_mp20_match_rate@0.8126.ckpt"
+# autoencoder_ckpt: "/home/rongzhi/ADiT-CSP/pre-ckpt/vae.ckpt"  ### pre-ckpt
 
 denoiser:
   _target_: src.models.denoisers.dit.DiT
@@ -8,7 +12,7 @@ denoiser:
   d_model: 768    # 384, 768, 1024
   nhead: 12        # 6, 12, 16
   num_layers: 12  # 12, 12, 24
-  num_datasets: 2
+  num_datasets: 2 #2
 
 interpolant:
   _target_: src.models.interpolants.flow_matching.FlowMatchingInterpolant

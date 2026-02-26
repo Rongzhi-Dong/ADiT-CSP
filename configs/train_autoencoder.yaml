@@ -7,7 +7,7 @@ defaults:
   - encoder: transformer
   - decoder: transformer
   - autoencoder_module: vae
-  - callbacks: autoencoder_default  # autoencoder_default / _qm9_only / _mp20_only
+  - callbacks: autoencoder_mp20_only  # autoencoder_default / _qm9_only / _mp20_only
   - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default
   - paths: default
@@ -34,6 +34,7 @@ train: True
 test: True
 
 # simply provide checkpoint path to resume training
+# ckpt_path: "/home/rongzhi/ADiT-CSP/logs/train_autoencoder/runs/vae_latent@8_kl@0.00001_2026-01-19_19-46-55/checkpoints/last.ckpt"  # path to VAE checkpoint
 ckpt_path: null
 
 # seed for random number generators in pytorch, numpy and python.random

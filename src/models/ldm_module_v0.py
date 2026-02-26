@@ -1,5 +1,5 @@
 """Copyright (c) Meta Platforms, Inc. and affiliates."""
-
+DEBUG_LDM_LATENT = False
 import copy
 import os
 import random
@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import wandb
 from lightning import LightningModule
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
@@ -20,6 +19,7 @@ from torch_geometric.utils import to_dense_batch
 from torchmetrics import MeanMetric
 from tqdm import tqdm
 
+import wandb
 from src.eval.crystal_generation import CrystalGenerationEvaluator
 from src.eval.mof_generation import MOFGenerationEvaluator
 from src.eval.molecule_generation import MoleculeGenerationEvaluator
@@ -111,21 +111,75 @@ class LatentDiffusionLitModule(LightningModule):
         self.interpolant = interpolant
 
         # evaluator objects for computing metrics
+        # self.val_generation_evaluators = {
+        #     "mp20": CrystalGenerationEvaluator(
+        #         dataset_cif_list=pd.read_csv(
+        #             os.path.join(self.hparams.sampling.data_dir, f"mp_20/raw/all.csv")
+        #         )["cif"].tolist()
+        #     ),
+        #     "qm9": MoleculeGenerationEvaluator(
+        #         dataset_smiles_list=torch.load(
+        #             os.path.join(self.hparams.sampling.data_dir, f"qm9/smiles.pt"),
+        #         ),
+        #         removeHs=self.hparams.sampling.removeHs,
+        #     ),
+        #     "qmof150": MOFGenerationEvaluator(),
+        # }
+        # self.test_generation_evaluators = copy.deepcopy(self.val_generation_evaluators)
+
+        ### modified by RZD
+        # --- START: robust evaluator setup (only create QM9 evaluator if qm9 enabled) ---
+        # Helper to check if QM9 dataset is active in datamodule config
+        qm9_enabled = False
+        try:
+            qm9_cfg = self.hparams.data.datamodule.datasets.get("qm9", None)
+            if qm9_cfg is not None:
+                # If proportion exists and >0 or explicit flag present, treat as enabled
+                proportion = qm9_cfg.get("proportion", 0.0)
+                qm9_enabled = float(proportion) > 0.0
+        except Exception:
+            qm9_enabled = False
+
+        # mp20 evaluator (keep as before)
+        mp20_eval = CrystalGenerationEvaluator(
+            dataset_cif_list=pd.read_csv(
+                os.path.join(self.hparams.sampling.data_dir, f"mp_20/raw/all.csv")
+            )["cif"].tolist()
+        )
+
+        # qm9 evaluator: only try to load SMILES if qm9 is enabled
+        if qm9_enabled:
+            qm9_smiles_path = os.path.join(self.hparams.sampling.data_dir, "qm9", "smiles.pt")
+            try:
+                qm9_smiles = torch.load(qm9_smiles_path)
+                log.info(f"Loaded QM9 smiles list from {qm9_smiles_path} (len={len(qm9_smiles)})")
+            except FileNotFoundError:
+                qm9_smiles = []
+                log.warning(f"QM9 smiles file not found at {qm9_smiles_path}. Continuing with empty list.")
+            except Exception as e:
+                qm9_smiles = []
+                log.warning(f"Unable to load QM9 smiles from {qm9_smiles_path}: {e}. Continuing with empty list.")
+
+            qm9_eval = MoleculeGenerationEvaluator(
+                dataset_smiles_list=qm9_smiles, removeHs=self.hparams.sampling.removeHs
+            )
+        else:
+            # Create an empty MoleculeGenerationEvaluator or None — using empty evaluator keeps downstream code simple
+            qm9_eval = MoleculeGenerationEvaluator(dataset_smiles_list=[], removeHs=self.hparams.sampling.removeHs)
+            log.info("QM9 dataset disabled in config (proportion=0). QM9 evaluator created with empty smiles list.")
+
+        # qmof150: keep original behavior (or similarly guard if you won't use it)
+        qmof_eval = MOFGenerationEvaluator()
+
         self.val_generation_evaluators = {
-            "mp20": CrystalGenerationEvaluator(
-                dataset_cif_list=pd.read_csv(
-                    os.path.join(self.hparams.sampling.data_dir, f"mp_20/raw/all.csv")
-                )["cif"].tolist()
-            ),
-            "qm9": MoleculeGenerationEvaluator(
-                dataset_smiles_list=torch.load(
-                    os.path.join(self.hparams.sampling.data_dir, f"qm9/smiles.pt"),
-                ),
-                removeHs=self.hparams.sampling.removeHs,
-            ),
-            "qmof150": MOFGenerationEvaluator(),
+            "mp20": mp20_eval,
+            "qm9": qm9_eval,
+            "qmof150": qmof_eval,
         }
         self.test_generation_evaluators = copy.deepcopy(self.val_generation_evaluators)
+        # --- END: robust evaluator setup ---
+                
+
 
         # metric objects for calculating and averaging across batches
         self.train_metrics = ModuleDict(
@@ -258,23 +312,18 @@ class LatentDiffusionLitModule(LightningModule):
 
     def forward(self, batch: Data, sample_posterior: bool = True):
         # Encode batch to latent space
-        # with torch.no_grad():
-        #     encoded_batch = self.autoencoder.encode(batch)
-        #     if sample_posterior:
-        #         encoded_batch["x"] = encoded_batch["posterior"].sample()
-        #     else:
-        #         encoded_batch["x"] = encoded_batch["posterior"].mode()
-        #     x_1 = encoded_batch["x"]
-
-        #     # Convert from PyG batch to dense batch with padding
-        #     x_1, mask = to_dense_batch(x_1, encoded_batch["batch"])
-        #     dense_encoded_batch = {"x_1": x_1, "token_mask": mask, "diffuse_mask": mask}
-        
-        
-        ######### modified by RZD  ####################
-        # Encode batch to latent space
         with torch.no_grad():
             encoded_batch = self.autoencoder.encode(batch)
+            # if sample_posterior:
+            #     encoded_batch["x"] = encoded_batch["posterior"].sample()
+            # else:
+            #     encoded_batch["x"] = encoded_batch["posterior"].mode()
+            # x_1 = encoded_batch["x"]
+
+            # # Convert from PyG batch to dense batch with padding
+            # x_1, mask = to_dense_batch(x_1, encoded_batch["batch"])
+
+            ##### modified by RZD
             # sample continuous posterior (z_cont) as before
             if sample_posterior:
                 z_cont = encoded_batch["posterior"].sample()
@@ -290,17 +339,20 @@ class LatentDiffusionLitModule(LightningModule):
 
             # ensure z_type is on same device and has same ordering
             z_type = z_type.to(z_cont.device)
-            
 
             # concat to form full latent (total_nodes, d+1)
             encoded_batch["x"] = torch.cat([z_type, z_cont], dim=-1)
+
             # for clarity keep x_cont separately too
             encoded_batch["x_cont"] = z_cont
             encoded_batch["z_type"] = z_type
+
             # x_1 is the full latent we will densify
             x_1 = encoded_batch["x"]
+
             # Convert from PyG batch to dense batch with padding
             x_1, mask = to_dense_batch(x_1, encoded_batch["batch"])
+            # --- START MODIFICATION ---
             # batch.atom_types contains the atomic numbers (e.g., 1 for H, 6 for C)
             # We must "densify" it to shape [Batch, Max_Nodes] to match x_1
             atom_types_dense, _ = to_dense_batch(batch.atom_types, encoded_batch["batch"])
@@ -310,47 +362,52 @@ class LatentDiffusionLitModule(LightningModule):
                 "token_mask": mask,
                 "diffuse_mask": mask,
                 "atom_types": atom_types_dense,  # <--- NEW FIELD
-            }                  
-        ######### End modification ####################
+            }
+            # --- END MODIFICATION ---
+
+            # dense_encoded_batch = {"x_1": x_1, "token_mask": mask, "diffuse_mask": mask}
 
         # Corrupt batch using the interpolant
         self.interpolant.device = dense_encoded_batch["x_1"].device
         noisy_dense_encoded_batch = self.interpolant.corrupt_batch(dense_encoded_batch)
 
-
-
-        ######### modified by RZD  ####################
+        ### modified by RZD
+        # --- START: Ensure first channel (type channel) is not corrupted ---
         # dense_encoded_batch["atom_types"] has shape (B, N) of integer atomic numbers
         # noisy_dense_encoded_batch["x_t"] has shape (B, N, d_total)
         if "atom_types" in dense_encoded_batch and "x_t" in noisy_dense_encoded_batch:
             # build z_type tensor to match the latent type encoding used in the VAE
             # NOTE: in vae_module we encoded types as float atom ids in channel 0
-            # z_type = dense_encoded_batch["atom_types"].to(
-            #     noisy_dense_encoded_batch["x_t"].dtype
-            # ).unsqueeze(-1)  # (B, N, 1)
+            z_type = dense_encoded_batch["atom_types"].to(
+                noisy_dense_encoded_batch["x_t"].dtype
+            ).unsqueeze(-1)  # (B, N, 1)
 
-            # # put on same device
-            # z_type = z_type.to(noisy_dense_encoded_batch["x_t"].device)
-
-            ####### Feb10 ##########
-            # FIX: convert integer atom types into the VAE's z_type representation
-            # Use the autoencoder helper so the type-channel scale matches the VAE's latent space.
-            z_type = self.autoencoder.atom_types_to_ztype(dense_encoded_batch["atom_types"].to(noisy_dense_encoded_batch["x_t"].device))
-            # ensure dtype matches the latent tensor
-            z_type = z_type.to(dtype=noisy_dense_encoded_batch["x_t"].dtype)
-
-            # ensure contiguous memory before in-place assignment (avoids odd stride issues)
-            z_type = z_type.contiguous()
-            ##### END ##########
-
-
+            # put on same device
+            z_type = z_type.to(noisy_dense_encoded_batch["x_t"].device)
 
             # replace the first channel of the noised latent with the deterministic type channel
             noisy_dense_encoded_batch["x_t"][..., 0:1] = z_type
 
             # Also ensure gt (x_1) first channel remains the deterministic type channel (sanity)
             noisy_dense_encoded_batch["x_1"][..., 0:1] = dense_encoded_batch["x_1"][..., 0:1]
-        ######### End modification ####################
+        # --- END: Ensure first channel (type channel) is not corrupted ---
+        
+        # ---------------- DEBUG SANITY CHECK (forward) ----------------
+        # Print small diagnostic showing that the first channel (type) is fixed
+        if getattr(self, "global_rank", 0) == 0 and DEBUG_LDM_LATENT:
+            try:
+                # print first batch element's first 20 node types (dense)
+                device = noisy_dense_encoded_batch["x_t"].device
+                x_t_first = noisy_dense_encoded_batch["x_t"][0, :20, 0].detach().cpu().tolist()
+                atom_types_first = dense_encoded_batch["atom_types"][0, :20].detach().cpu().tolist()
+                x1_first = noisy_dense_encoded_batch["x_1"][0, :20, 0].detach().cpu().tolist()
+                print(f"[DEBUG forward] x_t first-channel (first 20): {x_t_first}")
+                print(f"[DEBUG forward] atom_types_dense (first 20):    {atom_types_first}")
+                print(f"[DEBUG forward] x_1   first-channel (first 20): {x1_first}")
+            except Exception as e:
+                print(f"[DEBUG forward] sanity-check failed: {e}")
+        # ---------------- END DEBUG ----------------
+
 
         # Prepare conditioning inputs to forward pass
         dataset_idx = batch.dataset_idx + 1  # 0 -> null class
@@ -394,7 +451,7 @@ class LatentDiffusionLitModule(LightningModule):
         noisy_dense_encoded_batch: Dict[str, torch.Tensor],
         pred_x: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        # # Compute MSE loss w/ masking for padded tokens
+        # Compute MSE loss w/ masking for padded tokens
         # gt_x_1 = noisy_dense_encoded_batch["x_1"]
         # norm_scale = 1 - torch.min(noisy_dense_encoded_batch["t"].unsqueeze(-1), torch.tensor(0.9))
         # x_error = (gt_x_1 - pred_x) / norm_scale
@@ -405,7 +462,7 @@ class LatentDiffusionLitModule(LightningModule):
         # x_loss = torch.sum(x_error**2 * loss_mask[..., None], dim=(-1, -2)) / loss_denom
         # loss_dict = {"loss": x_loss.mean(), "x_loss": x_loss}
 
-        ######### modified by RZD  ####################
+        ### modified by RZD
         # Compute MSE loss w/ masking for padded tokens
         gt_x_1 = noisy_dense_encoded_batch["x_1"]
         norm_scale = 1 - torch.min(noisy_dense_encoded_batch["t"].unsqueeze(-1), torch.tensor(0.9))
@@ -423,9 +480,23 @@ class LatentDiffusionLitModule(LightningModule):
         # compute MSE over channels excluding the first (because its error is zeroed)
         x_loss = torch.sum(x_error**2 * loss_mask[..., None], dim=(-1, -2)) / loss_denom
         loss_dict = {"loss": x_loss.mean(), "x_loss": x_loss}
-        ######### End modification ####################
-        
-        
+
+        # ---------------- DEBUG SANITY CHECK (criterion) ----------------
+        # Confirm that the error on the first channel is zeroed and that the denominator accounts for D-1 channels
+        if getattr(self, "global_rank", 0) == 0 and DEBUG_LDM_LATENT:
+            try:
+                # sample first batch element
+                err0 = x_error[0, :, 0].detach().cpu()
+                nonzero_err0 = (err0.abs() > 1e-8).sum().item()
+                print(f"[DEBUG criterion] non-zero elements in x_error[...,0] (should be 0): {nonzero_err0}")
+                print(f"[DEBUG criterion] pred_x.shape: {pred_x.shape}, gt_x_1.shape: {gt_x_1.shape}")
+                print(f"[DEBUG criterion] loss_mask sum (tokens): {loss_mask[0].sum().item()}")
+                print(f"[DEBUG criterion] num_active_channels (D-1): {pred_x.size(-1)-1}")
+            except Exception as e:
+                print(f"[DEBUG criterion] sanity-check failed: {e}")
+        # ---------------- END DEBUG ----------------
+
+
         # add diffusion loss stratified across t
         num_bins = 4
         flat_losses = x_loss.detach().cpu().numpy().flatten()
@@ -602,41 +673,6 @@ class LatentDiffusionLitModule(LightningModule):
                 add_dataloader_idx=False,
             )
 
-    def build_lattice_matrix(self, lengths, angles):
-        """
-        Batch-compatible lattice matrix construction (Standard convention).
-        lengths: (B, 3), angles: (B, 3) in radians
-        """
-        device = lengths.device
-        a, b, c = lengths[:, 0], lengths[:, 1], lengths[:, 2]
-        alpha, beta, gamma = angles[:, 0], angles[:, 1], angles[:, 2]
-
-        # Batch initialization of components
-        zeros = torch.zeros_like(a)
-        
-        # Vector a along x-axis
-        ax, ay, az = a, zeros, zeros
-        
-        # Vector b in xy-plane
-        bx = b * torch.cos(gamma)
-        by = b * torch.sin(gamma)
-        bz = zeros
-        
-        # Vector c
-        cx = c * torch.cos(beta)
-        cy = c * (torch.cos(alpha) - torch.cos(beta) * torch.cos(gamma)) / torch.sin(gamma)
-        # Clamp to avoid NaNs in sqrt
-        cz = torch.sqrt(torch.clamp(c**2 - cx**2 - cy**2, min=1e-8))
-        
-        # Stack into (B, 3, 3) matrix
-        # Each row is a lattice vector: [a], [b], [c]
-        line1 = torch.stack([ax, ay, az], dim=1)
-        line2 = torch.stack([bx, by, bz], dim=1)
-        line3 = torch.stack([cx, cy, cz], dim=1)
-        
-        return torch.stack([line1, line2, line3], dim=1)
-
-
     def on_evaluation_epoch_end(self, stage: Literal["val", "test"]) -> None:
         """Lightning hook that is called when a validation/test epoch ends."""
 
@@ -646,9 +682,10 @@ class LatentDiffusionLitModule(LightningModule):
         generation_evaluators = getattr(self, f"{stage}_generation_evaluators")
 
         for dataset in metrics.keys():
+            if dataset not in self.val_generation_evaluators:  ### Added by RZD
+                continue
             generation_evaluators[dataset].device = metrics[dataset]["loss"].device
-            
-            ######### modified by RZD  ####################
+            # --- MODIFIED: Get the specific dataloader for this dataset  RZD---
             # We need real batches (atom types) for CSP, so we grab the loader.
             # Note: self.trainer.datamodule.val_dataloader() returns a list of loaders.
             dataset_idx_int = DATASET_TO_IDX[dataset]
@@ -661,94 +698,74 @@ class LatentDiffusionLitModule(LightningModule):
                 # dataloader = self.trainer.datamodule.val_dataloader()[dataset_idx_int]
             else:
                 dataloader = self.trainer.test_dataloaders[dataset_idx_int]
+
             t_start = time.time()
             samples_so_far = 0
-            for batch_data in tqdm(dataloader, desc=f"CSP Sampling {dataset}"):
+
+            # --- MODIFIED: Iterate over the Dataloader instead of range() ---
+            for batch in tqdm(dataloader, desc=f"    CSP Sampling {dataset}"):
                 # Stop if we have generated enough samples
                 if samples_so_far >= self.hparams.sampling.num_samples:
                     break
 
-                batch_data = batch_data.to(self.device)
+                batch = batch.to(self.device)
                 # Perform CSP Sampling using the real batch
                 # Pass only the arguments defined in your new sample_and_decode_csp function
-                out, decoder_batch, samples = self.sample_and_decode_csp(
-                    batch=batch_data,
+                out, batch, samples = self.sample_and_decode_csp(
+                    batch=batch,
                     cfg_scale=self.hparams.sampling.cfg_scale,
                 )
-            ######### End modification  ####################
-                        
-            # t_start = time.time()
-            # for samples_so_far in tqdm(
-            #     range(0, self.hparams.sampling.num_samples, self.hparams.sampling.batch_size),
-            #     desc=f"    Sampling",
-            # ):
-            #     # Perform sampling and decoding to crystal structures
-            #     out, batch, samples = self.sample_and_decode(
-            #         num_nodes_bincount=self.num_nodes_bincount[dataset],
-            #         spacegroups_bincount=self.spacegroups_bincount[dataset],
-            #         batch_size=self.hparams.sampling.batch_size,
-            #         cfg_scale=self.hparams.sampling.cfg_scale,
-            #         dataset_idx=DATASET_TO_IDX[dataset],
-            #     )
+
+                # for dataset in metrics.keys():
+                #     generation_evaluators[dataset].device = metrics[dataset]["loss"].device
+                #     t_start = time.time()
+                #     for samples_so_far in tqdm(
+                #         range(0, self.hparams.sampling.num_samples, self.hparams.sampling.batch_size),
+                #         desc=f"    Sampling",
+                #     ):
+                # Perform sampling and decoding to crystal structures
+                # out, batch, samples = self.sample_and_decode(
+                #     num_nodes_bincount=self.num_nodes_bincount[dataset],
+                #     spacegroups_bincount=self.spacegroups_bincount[dataset],
+                #     batch_size=self.hparams.sampling.batch_size,
+                #     cfg_scale=self.hparams.sampling.cfg_scale,
+                #     dataset_idx=DATASET_TO_IDX[dataset],
+                # )
+
                 # Save predictions for metrics and visualisation
                 start_idx = 0
-                for idx_in_batch, num_atom in enumerate(decoder_batch["num_atoms"].tolist()):
-
+                for idx_in_batch, num_atom in enumerate(batch["num_atoms"].tolist()):
                     _atom_types = (
                         out["atom_types"].narrow(0, start_idx, num_atom).argmax(dim=1)
                     )  # take argmax
-                    
                     _atom_types[_atom_types == 0] = 1  # atom type 0 -> 1 (H) to prevent crash
-                    # _pos = out["pos"].narrow(0, start_idx, num_atom) * 10.0  # nm to A
-                    _pos_A = out["pos"].narrow(0, start_idx, num_atom) * 10.0  # Cartesian in Å ### RZD 
-                    # _frac_coords = out["frac_coords"].narrow(0, start_idx, num_atom)% 1.0 ### RZD
+                    _pos = out["pos"].narrow(0, start_idx, num_atom) * 10.0  # nm to A
+                    _frac_coords = out["frac_coords"].narrow(0, start_idx, num_atom)
                     _lengths = out["lengths"][idx_in_batch] * float(num_atom) ** (
                         1 / 3
                     )  # unscale lengths
-                    # _angles = torch.rad2deg(out["angles"][idx_in_batch])  # convert to degrees
-                    _angles_rad = out["angles"][idx_in_batch]  # Keep in RADIANS for cell matrix
-                    _angles_deg = torch.rad2deg(_angles_rad)   # Convert to degrees for saving
-                    
-                    cell = self.build_lattice_matrix(_lengths.unsqueeze(0), _angles_rad.unsqueeze(0))[0]
-                    cell_inv = torch.linalg.inv(cell)
-                    _frac_coords_physical = (_pos_A @ cell_inv.T) 
-                    _frac_coords_wrapped = _frac_coords_physical % 1.0
-                    
-                    # diagnostic comparison (print only for first structure in the first batch)
-                    if idx_in_batch == 0 and samples_so_far == 0:
-                        dec_frac = out["frac_coords"].narrow(0, start_idx, num_atom)
-                        recomputed_frac = (_pos_A @ cell_inv.T) % 1.0
-                        print("DEBUG_FRAC_COMPARE:")
-                        print(" decoder frac (first 5):", dec_frac[:5].tolist())
-                        print(" recomputed frac (first 5):", recomputed_frac[:5].tolist())
-                        print(" recomputed frac span:", float(recomputed_frac.min()), float(recomputed_frac.max()))
-                        print(" decoder frac span:", float(dec_frac.min()), float(dec_frac.max()))
-
+                    _angles = torch.rad2deg(out["angles"][idx_in_batch])  # convert to degrees
                     generation_evaluators[dataset].append_pred_array(
                         {
                             "atom_types": _atom_types.detach().cpu().numpy(),
-                            # "pos": _pos.detach().cpu().numpy(),
-                            # "frac_coords": _frac_coords.detach().cpu().numpy(),
-                            "pos": _pos_A.detach().cpu().numpy(),
-                            "frac_coords": _frac_coords_wrapped.detach().cpu().numpy(),
+                            "pos": _pos.detach().cpu().numpy(),
+                            "frac_coords": _frac_coords.detach().cpu().numpy(),
                             "lengths": _lengths.detach().cpu().numpy(),
-                            "angles": _angles_deg.detach().cpu().numpy(),
+                            "angles": _angles.detach().cpu().numpy(),
                             "sample_idx": samples_so_far
-                            + self.global_rank * len(decoder_batch["num_atoms"])
+                            + self.global_rank * len(batch["num_atoms"])
                             + idx_in_batch,
                         }
                     )
                     start_idx = start_idx + num_atom
-                samples_so_far += batch_data.num_graphs
             t_end = time.time()
 
-            ### modified by RZD #####
+            # Compute generation metrics
+            ### modified by RZD
             if len(generation_evaluators[dataset].pred_arrays_list) == 0:
                 log.warning(f"[{stage}] No predictions for dataset={dataset}, skipping metrics.")
                 continue
-            ### END modification ######
-
-            # Compute generation metrics
+            ### END
             gen_metrics_dict = generation_evaluators[dataset].get_metrics(
                 save=self.hparams.sampling.visualize,
                 save_dir=self.hparams.sampling.save_dir + f"/{dataset}_{stage}_{self.global_rank}",
@@ -824,7 +841,8 @@ class LatentDiffusionLitModule(LightningModule):
         # create new samples from interpolant
         samples = self.interpolant.sample_with_classifier_free_guidance(
             batch_size=batch_size,
-            num_tokens=max(sample_lengths),
+            # num_tokens=max(sample_lengths),
+            num_tokens = int(sample_lengths), ### modified by RZD
             emb_dim=self.denoiser.d_x,
             model=self.denoiser,
             dataset_idx=dataset_idx,
@@ -843,67 +861,58 @@ class LatentDiffusionLitModule(LightningModule):
             ),
             "token_idx": (torch.cumsum(token_mask, dim=-1, dtype=torch.int64) - 1)[token_mask],
         }
-        # decode samples to crystal structures using frozen decoder    
+        # decode samples to crystal structures using frozen decoder
         out = self.autoencoder.decode(batch)
         return out, batch, samples
 
     def sample_and_decode_csp(self, batch, cfg_scale=4.0):
-        batch_size = batch.num_graphs
-        num_atoms = batch.num_atoms
+        """CSP Sampling using a real batch from the dataset."""
 
-        
-        # 1. Encode atom types
-        with torch.no_grad():
-            z_type_pyg = self.autoencoder.atom_types_to_ztype(batch.atom_types)
-            z_type_dense, token_mask = to_dense_batch(z_type_pyg, batch.batch)
-        
-        # 2. Sample
+        # 1. Extract Info from Batch
+        batch_size = batch.num_graphs
+        # Convert atom_types to dense [B, N]
+        atom_types_dense, token_mask = to_dense_batch(batch.atom_types, batch.batch)
+        sample_lengths = atom_types_dense.size(1)
+
+        # IMPORTANT: real per-graph number of atoms (B,)
+        num_atoms = batch.num_atoms  # tensor shape [B] ### modified by RZD
+        # 2. Prepare Inputs
+        dataset_idx = batch.dataset_idx + 1
+        spacegroup = batch.spacegroup
+
+        # 3. Call Interpolant with atom_types
         samples = self.interpolant.sample_with_classifier_free_guidance(
             batch_size=batch_size,
-            num_tokens=int(z_type_dense.size(1)),
-            emb_dim=self.denoiser.d_x,  # Currently wrong
+            # num_tokens=max(sample_lengths),  ## N=20 for MP_20
+            num_tokens = int(sample_lengths), ### modified by RZD
+            emb_dim=self.denoiser.d_x,
             model=self.denoiser,
-            dataset_idx=batch.dataset_idx + 1,
-            spacegroup=batch.spacegroup,
+            dataset_idx=dataset_idx,
+            spacegroup=spacegroup,
             cfg_scale=cfg_scale,
             token_mask=token_mask,
-            atom_types=z_type_dense,
+            atom_types=atom_types_dense,  #
         )
 
-        # 3. Extract and check
+        # get final samples and remove padding (to PyG format)
         x = samples["clean_traj"][-1][token_mask]
-        
-        ######## Feb 10 ########
-        # Defensive: make contiguous and verify continuous channels are non-trivial
-        x = x.contiguous()
 
-        # Quick diagnostic to see if continuous latent collapsed
-        cont = x[..., 1:]  # continuous channels
-        cont_mean = cont.mean().item()
-        cont_std = cont.std().item()
-
-
-        if z_type_pyg.dim() == 1:
-            z_type_pyg = z_type_pyg.unsqueeze(-1)
-        x[..., 0:1] = z_type_pyg.to(x.dtype)
-        
-
-        decoder_batch = {
+        batch = {
             "x": x,
-            "num_atoms": num_atoms,
+            # "num_atoms": sample_lengths,
+            "num_atoms": num_atoms,  # <-- MUST be (B,) ### RZD
             "batch": torch.repeat_interleave(
-                torch.arange(batch_size, device=self.device), num_atoms
+                # torch.arange(len(sample_lengths), device=self.device), sample_lengths
+                # torch.arange(sample_lengths, device=self.device), sample_lengths ### has error
+                torch.arange(batch_size, device=self.device), num_atoms ### modified by RZD
             ),
-            "token_idx": batch.token_idx if hasattr(batch, 'token_idx') else None,
-            "cell": batch.cell,
-            "lengths_scaled": batch.lengths_scaled,
-            "angles_radians": batch.angles_radians,
+            "token_idx": (torch.cumsum(token_mask, dim=-1, dtype=torch.int64) - 1)[token_mask],
         }
-
-        out = self.autoencoder.decode(decoder_batch)
-
-        return out, decoder_batch, samples
- 
+        if  DEBUG_LDM_LATENT:
+            print(f"[DEBUG CSP] x: {x.shape}, batch: {batch['batch'].shape} sum(num_atoms): {int(num_atoms.sum())}")
+        # decode samples to crystal structures using frozen decoder
+        out = self.autoencoder.decode(batch)
+        return out, batch, samples
 
     #####################################################################################################
 

@@ -1,5 +1,5 @@
 """Copyright (c) Meta Platforms, Inc. and affiliates."""
-DEBUG_VAE_LATENT = True
+DEBUG_VAE_LATENT = False
 import copy
 from typing import Any, Dict, Literal, Tuple
 
@@ -145,7 +145,7 @@ class VariationalAutoencoderLitModule(LightningModule):
         ### modified by RZD
         self.latent_dim_cont = latent_dim
         self.latent_dim_total = latent_dim + 1
-
+        ### end
         # quantization layers (following naming convention from Latent Diffusion)
         # self.quant_conv = torch.nn.Linear(self.encoder.d_model, 2 * latent_dim, bias=False)
         # self.post_quant_conv = torch.nn.Linear(latent_dim, self.decoder.d_model, bias=False)
@@ -157,7 +157,7 @@ class VariationalAutoencoderLitModule(LightningModule):
         self.post_quant_conv = torch.nn.Linear(
             self.latent_dim_cont, self.decoder.d_model, bias=False
         )
-
+        ### end
         # weights for scaling loss functions per dataset type
         self.loss_weights = loss_weights
         self.loss_weights_atom_types = torch.nn.Parameter(
@@ -289,7 +289,8 @@ class VariationalAutoencoderLitModule(LightningModule):
         # z_type: (total_nodes, 1) float
         # clamp to valid, round to nearest int
         return torch.round(z_type.squeeze(-1)).long()
-
+    ### end
+    
     # def encode(self, batch):
     #     encoded_batch = self.encoder(batch)
     #     encoded_batch["moments"] = self.quant_conv(encoded_batch["x"])
@@ -310,7 +311,8 @@ class VariationalAutoencoderLitModule(LightningModule):
         # encoded_batch["z_type"] = self.atom_types_to_ztype(batch.atom_types)
 
         return encoded_batch
-
+    ### end
+    
     # def decode(self, encoded_batch):
     #     encoded_batch["x"] = self.post_quant_conv(encoded_batch["x"])
     #     out = self.decoder(encoded_batch)
@@ -335,13 +337,13 @@ class VariationalAutoencoderLitModule(LightningModule):
         forced_logits.scatter_(1, atom_type_ids.unsqueeze(1).clamp(0, num_classes - 1), 1e9)
         out["atom_types"] = forced_logits
 
-        ### modified by RZD
         if DEBUG_VAE_LATENT:
             decoded_types = out["atom_types"].argmax(dim=1)
             print(
                 "[DEBUG] Decoded atom_types (first 10):",
                 decoded_types[:10].detach().cpu().tolist(),
             )
+        ### end
         return out
 
     # def forward(self, batch: Data, sample_posterior: bool = True):
@@ -355,7 +357,7 @@ class VariationalAutoencoderLitModule(LightningModule):
 
     ### modified by RZD
     def forward(self, batch: Data, sample_posterior: bool = True):
-        ### modified by RZD
+        
         if DEBUG_VAE_LATENT:
             print(
                 "\n[DEBUG] Input atom_types (first 10):",
@@ -373,7 +375,7 @@ class VariationalAutoencoderLitModule(LightningModule):
         # encoded_batch["x_cont"] = z_cont
         encoded_batch["x"] = torch.cat([z_type, z_cont], dim=-1)  # (total_nodes, d+1)
 
-        ### modified by RZD
+        
         if DEBUG_VAE_LATENT:
             print("[DEBUG] Latent x shape:", encoded_batch["x"].shape)
             print(
@@ -385,7 +387,7 @@ class VariationalAutoencoderLitModule(LightningModule):
             print("[DEBUG] z_type std:", z_type.std().item())
         out = self.decode(encoded_batch)
         return out, encoded_batch
-
+    ### end
     #####################################################################################################
 
     def reconstruction_criterion(
@@ -562,6 +564,8 @@ class VariationalAutoencoderLitModule(LightningModule):
                     ),
                     device=self.device,
                 )
+                ### end
+                
                 # save original positions and fractional coordinates
                 pos_ = batch.pos.clone()
                 frac_coords_ = batch.frac_coords.clone()
@@ -593,7 +597,7 @@ class VariationalAutoencoderLitModule(LightningModule):
         ### modified by RZD
         if hasattr(batch, "atom_types_clean"):
             delattr(batch, "atom_types_clean")
-
+        ### end
         # calculate loss
         loss_dict = self.criterion(batch, encoded_batch, out)
 

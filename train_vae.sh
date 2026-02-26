@@ -13,11 +13,15 @@ application="python src/train_autoencoder.py"
 
 # workdir="./"
 
-options="trainer=ddp logger=wandb name=$name \
-    ++autoencoder_module.latent_dim=$latent_dim \
-    ++autoencoder_module.loss_weights.loss_kl.mp20=$loss_kl \
-    ++autoencoder_module.loss_weights.loss_kl.qm9=$loss_kl"
+# options="trainer=ddp logger=wandb name=$name \
+#     ++autoencoder_module.latent_dim=$latent_dim \
+#     ++autoencoder_module.loss_weights.loss_kl.mp20=$loss_kl \
+#     ++autoencoder_module.loss_weights.loss_kl.qm9=$loss_kl"
 
+
+options="trainer=gpu logger=wandb name=$name \
+    ++autoencoder_module.latent_dim=$latent_dim \
+    ++autoencoder_module.loss_weights.loss_kl.mp20=$loss_kl"
 
 CMD="HYDRA_FULL_ERROR=1 $application $options"
 

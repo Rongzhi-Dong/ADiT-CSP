@@ -5,7 +5,7 @@
 defaults:
   - data:  mp20_only
   - diffusion_module: ldm
-  - callbacks: diffusion_default
+  - callbacks: diffusion_mp20_only
   - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default
   - paths: default
@@ -25,7 +25,9 @@ task_name: "eval_diffusion"
 tags: ["mp20_only", "diffusion", "eval"]
 
 # provide checkpoint path to evaluate
+
 ckpt_path: ""
+# ckpt_path: "/home/rongzhi/ADiT-CSP/pre-ckpt/ldm.ckpt" ### pre-ckpt
 
 # seed for random number generators in pytorch, numpy and python.random
 seed: 9

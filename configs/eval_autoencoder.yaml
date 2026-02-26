@@ -7,7 +7,7 @@ defaults:
   - encoder: transformer
   - decoder: transformer
   - autoencoder_module: vae
-  - callbacks: autoencoder_default
+  - callbacks: autoencoder_mp20_only
   - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default
   - paths: default

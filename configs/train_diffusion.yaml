@@ -5,7 +5,7 @@
 defaults:
   - data:  mp20_only  # joint / qm9_only / mp20_only
   - diffusion_module: ldm
-  - callbacks: diffusion_default  # diffusion_default / _qm9_only / _mp20_only
+  - callbacks: diffusion_mp20_only  # diffusion_default / _qm9_only / _mp20_only
   - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default
   - paths: default
