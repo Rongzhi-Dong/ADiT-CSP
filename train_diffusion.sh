@@ -1,41 +1,33 @@
-# DiT-S: 30M, DiT-B: 150M, DiT-L: 450M
-# d_model: 768    # 384, 768, 1024
-# nhead: 12        # 6, 12, 16
-# num_layers: 12  # 12, 12, 24
 
-d_x=9 ##(D+1)
-kl=0.0001
+dataset=mpts_52  #   mp_20 / perov_5 / carbon_24 / mpts_52
+d_x=8 # 4 / 6
+loss_weight_kl=0.0001  # 0.0001 / 0.00001
 
-# num_layers=12
-# d_model=768
-# nhead=12
-# name="DiT-B_vae_latent@${d_x}_kl@${kl}"
+name="${dataset}_cond_DiT-S_vae_latent@${d_x}_kl@${loss_weight_kl}"
 
-num_layers=12
-d_model=384
-nhead=6
-name="DiT-S_vae_latent@${d_x}_kl@${kl}"
+
 
 # Path to script and working directory
-application="python src/train_diffusion.py"
-# workdir="./"
+# ## carbon_24
+# application="python src/train_diffusion.py\
+#     data=$dataset \
+#     diffusion_module.autoencoder_ckpt=/home/rongzhid/ADiT-CSP/logs/train_autoencoder/runs/carbon_24_cond_vae_latent@8_kl@0.0001_2026-03-12_17-06-59/checkpoints/vae-epoch@99-step@2300-val_match_rate@0.9355.ckpt"
+    
 
-options="trainer=gpu logger=wandb name=$name \
-    ++diffusion_module.denoiser.num_layers=$num_layers \
-    ++diffusion_module.denoiser.d_model=$d_model \
-    ++diffusion_module.denoiser.nhead=$nhead \
-    ++diffusion_module.denoiser.d_x=$d_x"
+# ## preov_5
+# application="python src/train_diffusion.py\
+#     data=$dataset \
+#     diffusion_module.autoencoder_ckpt=/home/rongzhid/ADiT-CSP/logs/train_autoencoder/runs/perov_5_cond_vae_latent@8_kl@0.0001_2026-03-12_17-07-55/checkpoints/vae-epoch@49-step@2200-val_match_rate@1.0000.ckpt"
 
-CMD="HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=0 $application $options"
+## mpts_52
+application="python src/train_diffusion.py\
+    data=$dataset \
+    diffusion_module.autoencoder_ckpt=/home/rongzhid/ADiT-CSP/logs/train_autoencoder/runs/mpts_52_cond_vae_latent@8_kl@0.0001_2026-03-12_17-06-29/checkpoints/vae-epoch@99-step@9400-val_match_rate@0.9849.ckpt"
 
+options="trainer=gpu logger=wandb name=$name"
 
-# options="trainer=ddp logger=wandb name=$name \
-#     ++diffusion_module.denoiser.num_layers=$num_layers \
-#     ++diffusion_module.denoiser.d_model=$d_model \
-#     ++diffusion_module.denoiser.nhead=$nhead \
-#     ++diffusion_module.denoiser.d_x=$d_x"
-
-# CMD="HYDRA_FULL_ERROR=1 $application $options"
+CMD="HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=2 $application $options"
+# CMD="HYDRA_FULL_ERROR=1  $application $options"
 
 # Go to working directory
 

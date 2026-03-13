@@ -1,0 +1,32 @@
+_target_: src.models.vae_module.CrystalCSPVAELitModule
+
+encoder: ${encoder}
+decoder: ${decoder}
+
+latent_dim: 4
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.0001
+  weight_decay: 0.0
+
+scheduler: null
+
+scheduler_frequency: ${trainer.check_val_every_n_epoch}
+
+loss_weight_frac_coords: 10.0
+loss_weight_lengths: 1.0
+loss_weight_angles: 10.0
+loss_weight_kl: 0.0001 
+
+augmentations:
+  noise: 0.1  # proportion of atoms to perturb
+  frac_coords: true
+
+
+visualization:
+  visualize: true
+  save_dir: ${paths.viz_dir}/
+
+compile: false

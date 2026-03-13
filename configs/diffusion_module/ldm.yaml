@@ -1,0 +1,46 @@
+_target_: src.models.ldm_module.CrystalCSPLDMLitModule
+
+autoencoder_ckpt: ""
+
+denoiser:
+  _target_: src.models.denoisers.dit.CrystalCSPDiT
+  d_x: 8
+  d_model: 384    # 384, 768, 1024
+  nhead: 6        # 6, 12, 16
+  num_layers: 6  # 12, 12, 24
+  max_num_elements: 100
+  atom_type_dropout_prob: 0.0 
+
+interpolant:
+  _target_: src.models.interpolants.flow_matching.FlowMatchingInterpolant
+  min_t: 1e-2
+  corrupt: True
+  num_timesteps: 100
+  self_condition: true
+  self_condition_prob: 0.5
+
+augmentations:
+  frac_coords: true
+
+sampling:
+  cfg_scale: 1.0
+  num_samples: 500       # number of compositions to evaluate
+  num_candidates: 20     # K candidates per composition (generates match_rate@1,5,20)
+  batch_size: 100        # how many structures to generate in parallel per ODE call
+  data_dir: ${paths.data_dir}
+  visualize: true
+  save_dir: ${paths.viz_dir}
+
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.0001
+  weight_decay: 0.0
+
+scheduler: null
+
+scheduler_frequency: ${trainer.check_val_every_n_epoch}
+
+# compile model for faster training with pytorch 2.0
+compile: false

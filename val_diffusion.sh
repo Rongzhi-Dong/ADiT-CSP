@@ -1,52 +1,63 @@
-#!/usr/bin/env bash
-# Local evaluation script for DiT diffusion model
-# - No wandb
-# - No env activation
-# - No terminal arguments
-# - Edit checkpoint paths in THIS file only
-
-# set -eu -o pipefail
-
-# ============================================================
-#               EDIT THESE PATHS LATER
-# ============================================================
-
-# Path to DiT (diffusion) checkpoint
-# DIFF_CKPT="/home/rongzhi/ADiT-CSP/logs/train_diffusion/runs/DiT-B_vae_latent@9_kl@0.00001_2026-01-25_17-12-41/checkpoints/ldm-epoch@1499-step@159000-val_mp20_valid_rate@0.2120.ckpt"
-DIFF_CKPT="/home/rongzhi/ADiT-CSP/pre-ckpt/ldm.ckpt"
-
-# Path to VAE checkpoint
-# VAE_CKPT="/home/rongzhi/ADiT-CSP/logs/train_autoencoder/runs/vae_latent@8_kl@0.00001_2026-01-19_23-43-03/checkpoints/vae-epoch@3049-step@323300-val_mp20_match_rate@0.8126.ckpt"
-VAE_CKPT="/home/rongzhi/ADiT-CSP/pre-ckpt/vae.ckpt"
+HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=2 python src/eval_diffusion.py \
+  trainer=gpu \
+  logger=wandb \
+  name=test_viz_cond_ADIT \
+  ++sampling.visualize=true \
+  ckpt_path="/home/rongzhi/C-ADIT-CSP/logs/train_diffusion/runs/Mar10_cond_DiT-S_vae_latent@4_kl@0.0001_2026-03-11_02-08-02/checkpoints/ldm-epoch@1049-step@111300-val_valid_rate@0.9140.ckpt"
 
 
-name="test_pre-ckpt"
+
+# #!/usr/bin/env bash
+# # Local evaluation script for DiT diffusion model
+# # - No wandb
+# # - No env activation
+# # - No terminal arguments
+# # - Edit checkpoint paths in THIS file only
+
+# # set -eu -o pipefail
+
+# # ============================================================
+# #               EDIT THESE PATHS LATER
+# # ============================================================
+
+# # Path to DiT (diffusion) checkpoint
+# # DIFF_CKPT="/home/rongzhi/ADiT-CSP/logs/train_diffusion/runs/DiT-B_vae_latent@9_kl@0.00001_2026-01-25_17-12-41/checkpoints/ldm-epoch@1499-step@159000-val_mp20_valid_rate@0.2120.ckpt"
+# DIFF_CKPT='/home/rongzhi/C-ADIT-CSP/logs/train_diffusion/runs/Mar10_cond_DiT-S_vae_latent@4_kl@0.0001_2026-03-11_02-08-02/checkpoints/ldm-epoch@1049-step@111300-val_valid_rate@0.9140.ckpt'
+
+# # Path to VAE checkpoint
+# # VAE_CKPT="/home/rongzhi/ADiT-CSP/logs/train_autoencoder/runs/vae_latent@8_kl@0.00001_2026-01-19_23-43-03/checkpoints/vae-epoch@3049-step@323300-val_mp20_match_rate@0.8126.ckpt"
+# VAE_CKPT="/home/rongzhi/C-ADIT-CSP/logs/train_autoencoder/runs/Mar10_cond_vae_latent@4_kl@_2026-03-10_21-42-27/checkpoints/vae-epoch149@0.8933.ckpt"
 
 
-# d_x=9 ##(D+1)
-# kl=0.00001
-# name="val_DiT-S_vae_latent@${d_x}_kl@${kl}"
+# name="test_viz_cond_ADIT"
 
 
-application="python src/eval_diffusion.py"
-# workdir="./"
-
-# options="trainer=gpu logger=wandb name=$name \
-#     ++diffusion_module.denoiser.d_x=$d_x"
-
-options="trainer=gpu logger=wandb name=$name"
-
-CMD="HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=2 $application $options"
-
-# Go to working directory
+# # d_x=9 ##(D+1)
+# # kl=0.00001
+# # name="val_DiT-S_vae_latent@${d_x}_kl@${kl}"
 
 
-echo "Running command:"
-echo "$CMD"
-echo
+# application="python src/eval_diffusion.py"
+# # workdir="./"
 
-# Execute
-eval $CMD
+
+# options="trainer=gpu\
+#     logger=wandb\
+#     ckpt_path=$DIFF_CKPT\ 
+#     ++sampling.visualize=true\
+#     name=$name"
+
+# CMD="HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=2 $application $options"
+
+# # Go to working directory
+
+
+# echo "Running command:"
+# echo "$CMD"
+# echo
+
+# # Execute
+# eval $CMD
 
 # # ============================================================
 # #               OPTIONAL OVERRIDES
